@@ -1,0 +1,11 @@
+================ RESULTADOS MONTE CARLO (PASOS P1-P8) ================
+Simulacion de N = 100,000,000 pulsos (eta = 0.5011872336272722, d = 1e-09)
+Longitud de clave cribada (N_sift)      : 13,239,167 bits
+QBER observado en base Z (e_bit)        : 2.993 %
+Cota inferior monofotonica (N_Z^{1,L})  : 9,026,105.3
+Cota superior errores de fase (N_ph^{1,U}): 839,169.9 (tasa = 9.30 %)
+Bits sacrificados en Priv. Amp. (N_PA)  : 8,241,583.3 bits
+Bits consumidos en Error Corr. (N_EC)   : 2,979,738.4 bits
+Clave secreta neta generada (l)         : 2,017,845.2 bits
+Tasa de clave secreta empirica (R = l/N): 2.017845e-02 bits/pulso
+======================================================================
