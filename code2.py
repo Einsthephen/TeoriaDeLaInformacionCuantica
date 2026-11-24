@@ -1,16 +1,17 @@
 import numpy as np
 from replica_figuras_2_y_3 import (
     binary_entropy, kato_a_b_upper, kato_a_b_lower,
-    delta_U, delta_L, simulated_channel_data, optimize_key_rate_for_eta
+    delta_U, delta_L, simulated_channel_data
 )
+
 
 def km_a_transmitancia(L_km, alpha_db=0.2, eta_det=1.0):
     """
     Convierte una distancia de fibra en kilómetros a transmitancia de canal (eta).
-    alpha_db: Pérdida óptica en dB/km (típicamente 0.2 a 1550 nm).
-    eta_det: Eficiencia de detección de los APD o SNSPD de Bob.
     """
     return eta_det * (10 ** (-(alpha_db * L_km) / 10.0))
+
+
 def run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=0.5, d=1e-9,
                                  mu_S=0.48, mu_D=0.05, mu_V=0.0,
                                  p_Z=0.88, p_S=0.8, p_D=0.1, p_V=0.1,
@@ -23,6 +24,7 @@ def run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=0.5, d=1e-9,
 
     N_Z_obs = {'S': 0, 'D': 0, 'V': 0}
     N_Z_err_obs = {'S': 0, 'D': 0, 'V': 0}
+    N_X_obs = {'S': 0, 'D': 0, 'V': 0}
     N_X_err_obs = {'S': 0, 'D': 0, 'V': 0}
     N_Cross_obs = {'S': 0, 'D': 0, 'V': 0}
 
@@ -35,13 +37,12 @@ def run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=0.5, d=1e-9,
         B = min(batch_size, remaining)
         remaining -= B
 
-        a_i = rng.integers(0, 2, size=B, dtype=np.int8)
-        alpha_i = (rng.random(B) >= p_Z).astype(np.int8)
+        _a_i = rng.integers(0, 2, size=B, dtype=np.int8)
+        alpha_i = (rng.random(B) >= p_Z).astype(np.int8)  # 0 -> Z, 1 -> X
         w_idx = rng.choice(3, size=B, p=[p_S, p_D, p_V])
         mu_i = mus_arr[w_idx]
 
         m_i = rng.poisson(mu_i * eta)
-
         m_X = rng.binomial(m_i, q)
         m_Z = m_i - m_X
 
@@ -66,17 +67,22 @@ def run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=0.5, d=1e-9,
 
             if n_zw > 0:
                 m_Z_sub = m_Z[mask_sift_w]
-                err_dark_Z = np.where(m_Z_sub == 0, rng.random(n_zw) < 0.5, rng.random(n_zw) < (0.5 * d))
+                err_dark_Z = np.where(m_Z_sub == 0,
+                                      rng.random(n_zw) < 0.5,
+                                      rng.random(n_zw) < (0.5 * d))
                 err_mis_Z = rng.random(n_zw) < delta_mis
-                N_Z_err_obs[w_name] += int(np.sum(err_dark_Z | err_mis_Z))
+                N_Z_err_obs[w_name] += int(np.sum(err_dark_Z)) + int(np.sum(err_mis_Z))
 
             mask_X_w = only_X & (alpha_i == 1) & mask_w
             n_xw = int(np.sum(mask_X_w))
+            N_X_obs[w_name] += n_xw
             if n_xw > 0:
                 m_X_sub = m_X[mask_X_w]
-                err_dark_X = np.where(m_X_sub == 0, rng.random(n_xw) < 0.5, rng.random(n_xw) < (0.5 * d))
+                err_dark_X = np.where(m_X_sub == 0,
+                                      rng.random(n_xw) < 0.5,
+                                      rng.random(n_xw) < (0.5 * d))
                 err_mis_X = rng.random(n_xw) < delta_mis
-                N_X_err_obs[w_name] += int(np.sum(err_dark_X | err_mis_X))
+                N_X_err_obs[w_name] += int(np.sum(err_dark_X)) + int(np.sum(err_mis_X))
 
     N_Z_tilde, N_X_err_tilde, N_Cross_tilde, _, _ = simulated_channel_data(
         N_pulses, eta, mu_S, q, d, delta_mis, mu_D, mu_V, p_S, p_D, p_V, mode='passive'
@@ -106,10 +112,13 @@ def run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=0.5, d=1e-9,
     dU_ZV = delta_U(N_Z_obs['V'], N_Z_tilde['V'], N_pulses, eps)
     aU_Z1, _, b_minus_a_Z1 = kato_a_b_upper(N_pulses, N_Z_1_tilde, eps)
 
-    N_Z_1_L = (t_S * (N_Z_obs['S'] + dU_ZS)
-               + t_D * (N_Z_obs['D'] - dL_ZD)
-               + t_V * (N_Z_obs['V'] + dU_ZV)
-               - b_minus_a_Z1 * sqrt_N) / (1.0 + 2.0 * aU_Z1 / sqrt_N)
+    if aU_Z1 <= -0.5 * sqrt_N:
+        N_Z_1_L = 0.0
+    else:
+        N_Z_1_L = max(0.0, (t_S * (N_Z_obs['S'] + dU_ZS)
+                             + t_D * (N_Z_obs['D'] - dL_ZD)
+                             + t_V * (N_Z_obs['V'] + dU_ZV)
+                             - b_minus_a_Z1 * sqrt_N) / (1.0 + 2.0 * aU_Z1 / sqrt_N))
 
     dU_XD = delta_U(N_X_err_obs['D'], N_X_err_tilde['D'], N_pulses, eps)
     dL_XV = delta_L(N_X_err_obs['V'], N_X_err_tilde['V'], N_pulses, eps)
@@ -117,35 +126,42 @@ def run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=0.5, d=1e-9,
     dL_CV = delta_L(N_Cross_obs['V'], N_Cross_tilde['V'], N_pulses, eps)
     aL_ph1, _, b_minus_a_ph1 = kato_a_b_lower(N_pulses, N_ph_1_tilde, eps)
 
-    N_ph_1_U = ((p_int_1 / mu_D) * (
-            c1 * (np.exp(mu_D) * (N_X_err_obs['D'] + dU_XD) / p_D - (N_X_err_obs['V'] - dL_XV) / p_V) +
-            c2 * (np.exp(mu_D) * (N_Cross_obs['D'] + dU_CD) / p_D - (N_Cross_obs['V'] - dL_CV) / p_V)
-    ) + b_minus_a_ph1 * sqrt_N) / (1.0 - 2.0 * aL_ph1 / sqrt_N)
+    if aL_ph1 >= 0.5 * sqrt_N:
+        N_ph_1_U = float(N_pulses)
+    else:
+        N_ph_1_U = max(0.0, ((p_int_1 / mu_D) * (
+                c1 * (np.exp(mu_D) * (N_X_err_obs['D'] + dU_XD) / p_D - (N_X_err_obs['V'] - dL_XV) / p_V) +
+                c2 * (np.exp(mu_D) * (N_Cross_obs['D'] + dU_CD) / p_D - (N_Cross_obs['V'] - dL_CV) / p_V)
+        ) + b_minus_a_ph1 * sqrt_N) / (1.0 - 2.0 * aL_ph1 / sqrt_N))
 
     N_sift_obs = sum(N_Z_obs.values())
     N_sift_err_obs = sum(N_Z_err_obs.values())
-    e_bit_obs = N_sift_err_obs / max(1, N_sift_obs)
+    e_bit_obs = (N_sift_err_obs / max(1, N_sift_obs)) + delta_mis
 
-    N_PA = (N_sift_obs - N_Z_1_L
-            + N_Z_1_L * float(binary_entropy(N_ph_1_U / N_Z_1_L))
-            + xi)
+    if N_Z_1_L > 0.0:
+        ph_rate_obs = float(binary_entropy(min(1.0, N_ph_1_U / N_Z_1_L)))
+        N_PA = (N_sift_obs - N_Z_1_L + N_Z_1_L * ph_rate_obs + xi)
+    else:
+        ph_rate_obs = 1.0
+        N_PA = float(N_sift_obs + xi)
+
     N_EC = f_ec * N_sift_obs * float(binary_entropy(e_bit_obs))
     ell_final = max(0.0, N_sift_obs - N_PA - N_EC)
     R_mc = ell_final / N_pulses
 
     report = "================ RESULTADOS MONTE CARLO (PASOS P1-P8) ================\n"
-    report += f"Simulacion de N = {N_pulses:,} pulsos (eta = {eta}, d = {d:.0e})\n"
+    report += f"Simulacion de N = {N_pulses:,} pulsos (eta = {eta:.4f}, d = {d:.0e})\n"
     report += f"Longitud de clave cribada (N_sift)      : {N_sift_obs:,} bits\n"
     report += f"QBER observado en base Z (e_bit)        : {e_bit_obs * 100:.3f} %\n"
     report += f"Cota inferior monofotonica (N_Z^{{1,L}})  : {N_Z_1_L:,.1f}\n"
-    report += f"Cota superior errores de fase (N_ph^{{1,U}}): {N_ph_1_U:,.1f} (tasa = {N_ph_1_U / N_Z_1_L * 100:.2f} %)\n"
+    report += f"Cota superior errores de fase (N_ph^{{1,U}}): {N_ph_1_U:,.1f} (tasa = {ph_rate_obs * 100:.2f} %)\n"
     report += f"Bits sacrificados en Priv. Amp. (N_PA)  : {N_PA:,.1f} bits\n"
     report += f"Bits consumidos en Error Corr. (N_EC)   : {N_EC:,.1f} bits\n"
     report += f"Clave secreta neta generada (l)         : {ell_final:,.1f} bits\n"
     report += f"Tasa de clave secreta empirica (R = l/N): {R_mc:.6e} bits/pulso\n"
     report += "======================================================================\n"
 
-    with open('resultados_montecarlo.txt', 'w') as f:
+    with open('resultados_montecarlo.txt', 'w', encoding='utf-8') as f:
         f.write(report)
 
     print(report)
@@ -153,10 +169,7 @@ def run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=0.5, d=1e-9,
 
 
 if __name__ == '__main__':
-    # Ejemplo: Simular un enlace urbano de 15 kilómetros
     distancia_km = 15.0
     eta_calculado = km_a_transmitancia(distancia_km)
-
     print(f"Simulando enlace de {distancia_km} km (Transmitancia equivalente eta = {eta_calculado:.4f})")
-
     run_monte_carlo_qkd_protocol(N_pulses=100_000_000, eta=eta_calculado, d=1e-9)
