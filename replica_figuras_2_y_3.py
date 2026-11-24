@@ -186,4 +186,196 @@ def compute_key_rate(eta, mu_S, q, N, d, mode='passive', asymptotic=False,
 
     denom_decoy = mu_S - mu_D
     t_S = -(p_int_1 / p_S) * (mu_D * np.exp(mu_S)) / (mu_S * denom_decoy)
-    t_D = +(p_int_1 / p_D) * (mu_
+    t_D = +(p_int_1 / p_D) * (mu_S * np.exp(mu_D)) / (mu_D * denom_decoy)
+    t_V = -(p_int_1 / p_V) * mu_S / (mu_D * denom_decoy)
+
+    N_eff = 1.0 if asymptotic else N
+    N_Z, N_X_err, N_Cross, N_sift, e_bit = simulated_channel_data(
+        N_eff, eta, mu_S, q, d, delta_mis, mu_D, mu_V, p_S, p_D, p_V, mode=mode
+    )
+
+    if asymptotic:
+        N_Z_1_L = t_S * N_Z['S'] + t_D * N_Z['D'] + t_V * N_Z['V']
+
+        term_err = (np.exp(mu_D) * N_X_err['D'] / p_D) - (N_X_err['V'] / p_V)
+        term_crs = (np.exp(mu_D) * N_Cross['D'] / p_D) - (N_Cross['V'] / p_V)
+        N_ph_1_U = (p_int_1 / mu_D) * (c1 * term_err + c2 * term_crs)
+
+        valid = (N_Z_1_L > 1e-30) & (N_ph_1_U >= 0.0)
+        ph_rate = np.where(valid, N_ph_1_U / np.maximum(N_Z_1_L, 1e-30), 1.0)
+
+        R = np.where(
+            valid,
+            N_Z_1_L * (1.0 - binary_entropy(ph_rate)) - f_ec * N_sift * binary_entropy(e_bit),
+            0.0
+        )
+        return np.maximum(0.0, R)
+
+    sqrt_N = np.sqrt(N)
+
+    N_Z_tilde_1 = np.maximum(0.0, t_S * N_Z['S'] + t_D * N_Z['D'] + t_V * N_Z['V'])
+    term_err_tilde = (np.exp(mu_D) * N_X_err['D'] / p_D) - (N_X_err['V'] / p_V)
+    term_crs_tilde = (np.exp(mu_D) * N_Cross['D'] / p_D) - (N_Cross['V'] / p_V)
+    N_ph_tilde_1 = np.maximum(0.0, (p_int_1 / mu_D) * (c1 * term_err_tilde + c2 * term_crs_tilde))
+
+    dU_ZS = delta_U(N_Z['S'], N_Z['S'], N, eps)
+    dL_ZD = delta_L(N_Z['D'], N_Z['D'], N, eps)
+    dU_ZV = delta_U(N_Z['V'], N_Z['V'], N, eps)
+
+    aU_Z1, _, b_minus_a_Z1 = kato_a_b_upper(N, N_Z_tilde_1, eps)
+    curly_Z = (t_S * (N_Z['S'] + dU_ZS)
+               + t_D * (N_Z['D'] - dL_ZD)
+               + t_V * (N_Z['V'] + dU_ZV)
+               - b_minus_a_Z1 * sqrt_N)
+
+    pref_Z = 1.0 + (2.0 * aU_Z1) / sqrt_N
+    N_Z_1_L = np.where(aU_Z1 > -0.5 * sqrt_N, curly_Z / pref_Z, 0.0)
+
+    dU_XD = delta_U(N_X_err['D'], N_X_err['D'], N, eps)
+    dL_XV = delta_L(N_X_err['V'], N_X_err['V'], N, eps)
+    term_1 = c1 * ((np.exp(mu_D) * (N_X_err['D'] + dU_XD) / p_D)
+                   - ((N_X_err['V'] - dL_XV) / p_V))
+
+    if mode == 'passive':
+        dU_CD = delta_U(N_Cross['D'], N_Cross['D'], N, eps)
+        dL_CV = delta_L(N_Cross['V'], N_Cross['V'], N, eps)
+        term_2 = c2 * ((np.exp(mu_D) * (N_Cross['D'] + dU_CD) / p_D)
+                       - ((N_Cross['V'] - dL_CV) / p_V))
+    else:
+        term_2 = 0.0
+
+    aL_ph1, _, b_minus_a_ph1 = kato_a_b_lower(N, N_ph_tilde_1, eps)
+    curly_ph = (p_int_1 / mu_D) * (term_1 + term_2) + b_minus_a_ph1 * sqrt_N
+    pref_ph = 1.0 - (2.0 * aL_ph1) / sqrt_N
+    N_ph_1_U = np.where(aL_ph1 < 0.5 * sqrt_N, curly_ph / pref_ph, float(N))
+
+    valid = (N_Z_1_L > 1e-12) & (N_ph_1_U >= 0.0)
+    ph_rate = np.where(valid, N_ph_1_U / np.maximum(N_Z_1_L, 1e-12), 1.0)
+
+    N_EC = f_ec * N_sift * binary_entropy(e_bit)
+    ell = np.where(
+        valid,
+        N_Z_1_L * (1.0 - binary_entropy(ph_rate)) - xi - N_EC,
+        0.0
+    )
+    return np.maximum(0.0, ell / N)
+
+
+# =============================================================================
+# 4. OPTIMIZADOR GLOBAL + LOCAL SOBRE (mu_S, p_Z = 1 - q)
+# =============================================================================
+
+MU_GRID = np.linspace(0.055, 0.85, 65)
+Q_GRID = np.geomspace(1e-4, 0.495, 65)
+MU_MESH, Q_MESH = np.meshgrid(MU_GRID, Q_GRID, indexing='ij')
+
+
+def optimize_key_rate_for_eta(eta, N, d, mode='passive', asymptotic=False):
+    """
+    Optimiza R respecto a mu_S > 0.05 y 0 < q < 0.5 (es decir, p_Z = 1 - q > 0.5).
+    """
+    R_grid = compute_key_rate(eta, MU_MESH, Q_MESH, N, d, mode=mode, asymptotic=asymptotic)
+    max_idx = np.unravel_index(np.argmax(R_grid), R_grid.shape)
+    best_R_grid = R_grid[max_idx]
+
+    if best_R_grid <= 0.0:
+        return 0.0
+
+    mu_init = MU_MESH[max_idx]
+    q_init = Q_MESH[max_idx]
+
+    def obj(x):
+        mu_val, log10_q = x
+        q_val = 10.0 ** log10_q
+        if not (0.0501 < mu_val < 1.5 and 1e-7 < q_val < 0.4999):
+            return 0.0
+        val = compute_key_rate(eta, mu_val, q_val, N, d, mode=mode, asymptotic=asymptotic)
+        return -float(val)
+
+    res = minimize(
+        obj,
+        x0=[mu_init, np.log10(q_init)],
+        method='Nelder-Mead',
+        options={'xatol': 1e-4, 'fatol': 1e-11, 'maxiter': 250}
+    )
+    return max(best_R_grid, -res.fun)
+
+
+# =============================================================================
+# 5. GENERACIÓN DE LAS FIGURAS 2 Y 3 DEL ARTÍCULO
+# =============================================================================
+
+def generate_paper_figures():
+    configs = [
+        {
+            'fig_num': 2,
+            'd': 1e-9,
+            'ylim': (1e-9, 1e0),
+            'filename': 'Figura_2_replica_d_1e-9.png',
+            'title': r'Réplica Figura 2: $d = 10^{-9}$ (Pasivo: sólida, Activo: discontinua)'
+        },
+        {
+            'fig_num': 3,
+            'd': 1e-6,
+            'ylim': (1e-8, 1e0),
+            'filename': 'Figura_3_replica_d_1e-6.png',
+            'title': r'Réplica Figura 3: $d = 10^{-6}$ (Pasivo: sólida, Activo: discontinua)'
+        }
+    ]
+
+    curves_spec = [
+        {'label': r'$N = 10^8$', 'N': 1e8, 'asymp': False, 'color': '#FFA500'},
+        {'label': r'$N = 10^{10}$', 'N': 1e10, 'asymp': False, 'color': '#00FF00'},
+        {'label': r'$N = 10^{12}$', 'N': 1e12, 'asymp': False, 'color': '#FF0000'},
+        {'label': 'Asintótico', 'N': None, 'asymp': True, 'color': '#000000'}
+    ]
+
+    eta_vals = np.logspace(-5, 0, 140)
+
+    for cfg in configs:
+        d = cfg['d']
+        print(f"\n--- Calculando Figura {cfg['fig_num']} (d = {d:.0e}) ---")
+        plt.figure(figsize=(8, 5.8), dpi=150)
+
+        for spec in curves_spec:
+            N_val = spec['N']
+            asymp = spec['asymp']
+            color = spec['color']
+            label = spec['label']
+
+            R_passive = np.array([
+                optimize_key_rate_for_eta(eta, N_val, d, mode='passive', asymptotic=asymp)
+                for eta in eta_vals
+            ])
+            R_active = np.array([
+                optimize_key_rate_for_eta(eta, N_val, d, mode='active', asymptotic=asymp)
+                for eta in eta_vals
+            ])
+
+            R_pas_plot = np.where(R_passive > 0, R_passive, np.nan)
+            R_act_plot = np.where(R_active > 0, R_active, np.nan)
+
+            plt.plot(eta_vals, R_pas_plot, linestyle='-', color=color, linewidth=1.8,
+                     label=f"{label} (Pasivo)")
+            plt.plot(eta_vals, R_act_plot, linestyle='--', color=color, linewidth=1.8,
+                     label=f"{label} (Activo)")
+            print(f"  Completada curva {label}")
+
+        plt.xscale('log')
+        plt.yscale('log')
+        plt.xlim(1e-5, 1e0)
+        plt.ylim(*cfg['ylim'])
+        plt.xlabel(r'Channel transmission $\eta$', fontsize=12)
+        plt.ylabel('Key rate per pulse', fontsize=12)
+        plt.title(cfg['title'], fontsize=12)
+        plt.grid(True, which='both', linestyle=':', alpha=0.4)
+        plt.legend(fontsize=8.5, ncol=2, loc='lower right')
+        plt.tight_layout()
+        plt.savefig(cfg['filename'])
+        print(f"Figura guardada en: {cfg['filename']}")
+
+    plt.show()
+
+
+if __name__ == '__main__':
+    generate_paper_figures()
